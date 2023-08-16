@@ -71,6 +71,8 @@
 #include "utilities/merge_operators/bytesxor.h"
 #include "utilities/merge_operators/sortlist.h"
 #include "utilities/persistent_cache/block_cache_tier.h"
+#include "util/zipf.h"
+#include "util/latest-generator.h"
 
 #ifdef MEMKIND
 #include "memory/memkind_kmem_allocator.h"
@@ -91,6 +93,7 @@ DEFINE_string(
     "fillsync,"
     "fillrandom,"
     "filluniquerandomdeterministic,"
+    "nutanix,"
     "overwrite,"
     "readrandom,"
     "newiterator,"
@@ -876,6 +879,8 @@ DEFINE_int64(
 DEFINE_string(block_cache_trace_file, "", "Block cache trace file path.");
 DEFINE_int32(trace_replay_threads, 1,
              "The number of threads to replay, must >=1.");
+
+DEFINE_bool(YCSB_uniform_distribution, false, "Uniform key distribution for YCSB");
 
 static enum ROCKSDB_NAMESPACE::CompressionType StringToCompressionType(
     const char* ctype) {
@@ -3088,6 +3093,8 @@ class Benchmark {
         method = &Benchmark::DeleteSeq;
       } else if (name == "deleterandom") {
         method = &Benchmark::DeleteRandom;
+      } else if (name == "nutanix") {
+        method = &Benchmark::NutanixWorkload;
       } else if (name == "readwhilewriting") {
         num_threads++;  // Add extra thread for writing
         method = &Benchmark::ReadWhileWriting;
@@ -4875,6 +4882,105 @@ class Benchmark {
     return Status::NotSupported(
         "Rocksdb Lite doesn't support filldeterministic");
 #endif  // ROCKSDB_LITE
+  }
+
+  void NutanixWorkload(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num);
+    
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    Duration duration(FLAGS_duration, FLAGS_num);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+
+    // the number of iterations is the larger of read_ or write_
+    while (!duration.Done(1)) {
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution){
+        //Generate number from uniform distribution            
+        k = thread->rand.Next() % FLAGS_num;
+      } else { //default
+        //Generate number from zipf distribution
+        k = nextValue() % FLAGS_num;            
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      //Decide the item size associated with the key k by a given distribution
+      long item_size;
+      if((reads_done+writes_done) % 100 < 1) // 1%
+        item_size = 100;
+      else if((reads_done+writes_done) % 100 < 82) // 81% + 1%
+        item_size = 400;
+      else if((reads_done+writes_done) % 100 < 98)
+        item_size = 1024;
+      else
+        item_size = 4096;
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 58){ //58% write
+        //write
+        Status s = db->Put(write_options_, key, gen.Generate(item_size));
+        if (!s.ok()) {
+          //fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          //exit(1);
+        } else{
+            writes_done++;
+            thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+
+      } else if(next_op < 98){ // 40% read
+        //read
+        Status s = db->Get(options, key, &value);
+        if (!s.ok() && !s.IsNotFound()) {
+          //fprintf(stderr, "get error: %s\n", s.ToString().c_str());
+          // we continue after error rather than exiting so that we can
+          // find more errors if any
+        } else if (!s.IsNotFound()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+        
+      } else{ // 2% scan
+        //scan
+        
+        //TODO need to draw a random number for the scan length
+        //for now, scan lenght constant
+        int scan_length = thread->rand.Next() % 100;
+
+        Iterator* iter = db->NewIterator(options);
+        int64_t i = 0;
+        int64_t bytes = 0;
+        for (iter->Seek(key); i < 100 && iter->Valid(); iter->Next()) {
+          bytes += iter->key().size() + iter->value().size();
+          //thread->stats.FinishedOps(nullptr, db, 1, kRead);
+          ++i;
+
+        }
+
+        delete iter;
+
+        reads_done++;
+        thread->stats.FinishedOps(nullptr, db, 1, kRead);
+      }
+
+    } 
+    char msg[100];
+    snprintf(msg, sizeof(msg), "( reads:%" PRIu64 " writes:%" PRIu64 \
+             " total:%" PRIu64 " found:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found);
+    thread->stats.AddMessage(msg);
+
   }
 
   void ReadSequential(ThreadState* thread) {
@@ -7387,6 +7493,9 @@ int db_bench_tool(int argc, char** argv) {
   }
 
   ROCKSDB_NAMESPACE::Benchmark benchmark;
+  // Initialize the zipf distribution for YCSB
+  init_zipf_generator(0, FLAGS_num);
+  init_latestgen(FLAGS_num);
   benchmark.Run();
 
 #ifndef ROCKSDB_LITE
