@@ -4908,8 +4908,8 @@ class Benchmark {
       long k;
       long prob;
 
-      k = thread->rand.Next() //Generate a random number as the base for the key
-      prob = thread->rand.Next() % 10000 //Used to determine the distribution of key generation
+      k = thread->rand.Next(); //Generate a random number as the base for the key
+      prob = thread->rand.Next() % 10000; //Used to determine the distribution of key generation
 
       if (prob <13) {
         k = 0 + k % 144000000;
