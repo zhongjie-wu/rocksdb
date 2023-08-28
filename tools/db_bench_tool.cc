@@ -4906,13 +4906,25 @@ class Benchmark {
       DB* db = SelectDB(thread);
 
       long k;
-      if (FLAGS_YCSB_uniform_distribution){
-        //Generate number from uniform distribution            
-        k = thread->rand.Next() % FLAGS_num;
-      } else { //default
-        //Generate number from zipf distribution
-        k = nextValue() % FLAGS_num;            
+      long prob;
+
+      k = thread->rand.Next() //Generate a random number as the base for the key
+      prob = thread->rand.Next() % 10000 //Used to determine the distribution of key generation
+
+      if (prob <13) {
+        k = 0 + k % 144000000;
+      } else if (prob < 8130) {
+        k = 144000000 + k % (314400000-144000000);
+      } else if (prob < 9444) {
+        k = 314400000 + k % (450000000-314400000);
+      } else if (prob < 9742) {
+        k = 450000000 + k % (480000000-450000000);
+      } else if (prob < 9920) {
+        k = 480000000 + k % (490000000-480000000);
+      } else {
+        k = 490000000 + k % (500000000-490000000);
       }
+
       GenerateKeyFromInt(k, FLAGS_num, &key);
 
       //Decide the item size associated with the key k by a given distribution
@@ -4927,7 +4939,7 @@ class Benchmark {
         item_size = 4096;
 
       int next_op = thread->rand.Next() % 100;
-      if (next_op < 58){ //58% write
+      if (next_op < 57){ //57% write
         //write
         Status s = db->Put(write_options_, key, gen.Generate(item_size));
         if (!s.ok()) {
@@ -4938,7 +4950,7 @@ class Benchmark {
             thread->stats.FinishedOps(nullptr, db, 1, kWrite);
         }
 
-      } else if(next_op < 98){ // 40% read
+      } else if(next_op < 98){ // 41% read
         //read
         Status s = db->Get(options, key, &value);
         if (!s.ok() && !s.IsNotFound()) {
